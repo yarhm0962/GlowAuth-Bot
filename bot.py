@@ -12,7 +12,7 @@ from discord.ext import commands
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GLOWAUTH_BASE_URL = os.getenv("GLOWAUTH_BASE_URL", "https://glowauth.pages.dev").strip().rstrip("/")
 PORT = int(os.getenv("PORT", "10000"))
-TIMEOUT = aiohttp.ClientTimeout(total=15)
+TIMEOUT = aiohttp.ClientTimeout(total=8, connect=4)
 SCRIPT_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 SCRIPT_CACHE = {}
 
@@ -31,7 +31,7 @@ def make_loader(script):
 async def get_json(url):
     try:
         async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
-            async with session.get(url, headers={"Accept": "application/json"}) as response:
+            async with session.get(url, headers={"Accept": "application/json", "User-Agent": "GlowAuth-Discord-Bot/1.1"}) as response:
                 try:
                     data = await response.json(content_type=None)
                 except (ValueError, aiohttp.ContentTypeError):
@@ -39,12 +39,15 @@ async def get_json(url):
                 if not isinstance(data, dict):
                     return None, "GlowAuth returned an invalid response."
                 if response.status != 200:
-                    return None, data.get("error", f"GlowAuth returned HTTP {response.status}.")
+                    return None, str(data.get("error") or f"GlowAuth returned HTTP {response.status}.")
                 return data, None
     except asyncio.TimeoutError:
-        return None, "GlowAuth request timed out."
+        return None, "GlowAuth took too long to respond. The panel is shown, but script details could not be verified."
     except aiohttp.ClientError:
-        return None, "Couldn't connect to GlowAuth."
+        return None, "Couldn't connect to GlowAuth. The panel is shown, but script details could not be verified."
+    except Exception as exc:
+        print(f"GlowAuth request error: {type(exc).__name__}: {exc}")
+        return None, "An unexpected error occurred while checking GlowAuth."
 
 
 async def fetch_script(script_id, force=False):
@@ -61,7 +64,7 @@ async def fetch_script(script_id, force=False):
     return script, None
 
 
-def script_embed(script):
+def script_embed(script, note=None):
     preview = bool(script.get("preview"))
     verified = bool(script.get("verified")) and not preview
     name = discord.utils.escape_markdown(str(script.get("name") or "GlowAuth Script"))
@@ -69,18 +72,28 @@ def script_embed(script):
     script_id = str(script.get("id") or "Not set")
     size = int(script.get("size") or 0)
     tick = chr(96)
-    description = (f"**{name}**\n{tick}PREVIEW ONLY{tick} · Layout test" if preview else
-                  f"**{name}**\n{tick}{'ACTIVE' if verified and not script.get('deleted') else 'UNVERIFIED'}{tick}")
-    embed = discord.Embed(title="✦ GlowAuth · Script Panel", description=description,
-                          color=0x8B5CF6 if verified or preview else 0xF0B35A)
+    if preview:
+        status = "PREVIEW ONLY"
+    elif script.get("deleted"):
+        status = "DELETED"
+    elif verified:
+        status = "VERIFIED"
+    else:
+        status = "UNVERIFIED"
+    description = f"**{name}**\n{tick}{status}{tick}"
+    if note:
+        description += f"\n\n{note}"
+    color = 0x8B5CF6 if verified or preview else (0xED4245 if script.get("deleted") else 0xF0B35A)
+    embed = discord.Embed(title="✦ GlowAuth · Script Panel", description=description, color=color)
     embed.add_field(name="Script ID", value=f"{tick}{script_id if not preview else 'Not set'}{tick}", inline=False)
     embed.add_field(name="Type", value=f"{tick}.{extension}{tick}", inline=True)
     if not preview:
         embed.add_field(name="Size", value=f"{tick}{size:,} bytes{tick}", inline=True)
-        embed.add_field(name="Raw URL", value=f"[Open raw script]({raw_url(script)})", inline=False)
-        embed.add_field(name="Status", value="Verified from GlowAuth." if verified else "This ID could not be verified.", inline=False)
+        if verified and not script.get("deleted"):
+            embed.add_field(name="Raw URL", value=f"[Open raw script]({raw_url(script)})", inline=False)
+        embed.add_field(name="Status", value=note or ("Verified from GlowAuth." if verified else "This ID could not be verified against GlowAuth."), inline=False)
     else:
-        embed.add_field(name="Preview", value="Use /create script with a real script ID to load its details.", inline=False)
+        embed.add_field(name="Preview", value="This confirms the panel UI works. Use a real script ID to load its details.", inline=False)
     embed.set_footer(text="GlowAuth • Script management")
     return embed
 
@@ -93,8 +106,10 @@ class ScriptPanel(discord.ui.View):
         self.preview = bool(script.get("preview"))
         if self.preview:
             self.add_item(discord.ui.Button(label="Preview Mode", emoji="🧪", style=discord.ButtonStyle.secondary, disabled=True))
-        else:
+        elif script.get("verified") and not script.get("deleted"):
             self.add_item(discord.ui.Button(label="Open Raw", emoji="🔗", style=discord.ButtonStyle.link, url=raw_url(script)))
+        else:
+            self.add_item(discord.ui.Button(label="Raw Unavailable", emoji="🔒", style=discord.ButtonStyle.secondary, disabled=True))
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
@@ -109,7 +124,7 @@ class ScriptPanel(discord.ui.View):
         elif self.script.get("deleted"):
             await interaction.response.send_message("This script has been deleted.", ephemeral=True)
         elif not self.script.get("verified"):
-            await interaction.response.send_message("This script ID could not be verified. Check the ID and try again.", ephemeral=True)
+            await interaction.response.send_message("GlowAuth could not verify this script ID, so the loader is disabled. Check the ID and try again.", ephemeral=True)
         else:
             tick = chr(96)
             await interaction.response.send_message(f"**GlowAuth Loader**\n{tick * 3}lua\n{make_loader(self.script)}\n{tick * 3}", ephemeral=True)
@@ -120,14 +135,18 @@ class ScriptPanel(discord.ui.View):
             await interaction.response.send_message("Preview panels cannot be refreshed.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        script, error = await fetch_script(str(self.script["id"]), force=True)
-        if error:
-            await interaction.followup.send(f"❌ {error}", ephemeral=True)
-            return
-        if script.get("deleted"):
-            await interaction.followup.send("This script has been deleted.", ephemeral=True)
-            return
-        await interaction.followup.send(embed=script_embed(script), view=ScriptPanel(script, interaction.user.id), ephemeral=True)
+        try:
+            script, error = await fetch_script(str(self.script["id"]), force=True)
+            if error or not script:
+                await interaction.followup.send(f"⚠️ {error or 'Could not load this script.'}", ephemeral=True)
+                return
+            if script.get("deleted"):
+                await interaction.followup.send("This script has been deleted.", ephemeral=True)
+                return
+            await interaction.followup.send(embed=script_embed(script), view=ScriptPanel(script, interaction.user.id), ephemeral=True)
+        except Exception as exc:
+            print(f"Refresh button error: {type(exc).__name__}: {exc}")
+            await interaction.followup.send("⚠️ Refresh failed unexpectedly. Check the bot's Render logs.", ephemeral=True)
 
 
 group = app_commands.Group(name="create", description="Create GlowAuth panels")
@@ -142,19 +161,56 @@ async def create_script(interaction: discord.Interaction, script_id: str = None)
         preview = {"id": "0" * 32, "name": "GlowAuth Panel Preview", "extension": "lua", "size": 0, "preview": True}
         await interaction.response.send_message(embed=script_embed(preview), view=ScriptPanel(preview, interaction.user.id))
         return
+
     script_id = script_id.strip().lower()
     if not SCRIPT_ID_PATTERN.fullmatch(script_id):
-        await interaction.response.send_message("Enter the 32-character script ID from GlowAuth, or leave it empty to preview the panel.", ephemeral=True)
+        await interaction.response.send_message("Enter the 32-character script ID from your GlowAuth dashboard, or leave it empty to preview the panel.", ephemeral=True)
         return
-    await interaction.response.defer(thinking=True)
-    script, error = await fetch_script(script_id, force=True)
-    if script and script.get("deleted"):
-        await interaction.followup.send(embed=discord.Embed(title="Script deleted", description="This script is no longer available.", color=0xED4245), ephemeral=True)
-        return
-    if error or not script:
-        await interaction.followup.send(f"Couldn't load this script from GlowAuth: {error}", ephemeral=True)
-        return
-    await interaction.followup.send(embed=script_embed(script), view=ScriptPanel(script, interaction.user.id))
+
+    placeholder = {
+        "id": script_id, "name": "Checking GlowAuth…", "extension": "lua",
+        "size": 0, "verified": False,
+    }
+    view = ScriptPanel(placeholder, interaction.user.id)
+    await interaction.response.send_message(
+        embed=script_embed(placeholder, "Checking the GlowAuth registry. This panel will update automatically."),
+        view=view,
+    )
+    try:
+        script, error = await fetch_script(script_id, force=True)
+        if script and script.get("deleted"):
+            await interaction.edit_original_response(
+                embed=discord.Embed(title="🗑️ Script deleted", description="This script is no longer available.", color=0xED4245),
+                view=None,
+            )
+            return
+        if error or not script:
+            fallback = {
+                "id": script_id, "name": "GlowAuth Script", "extension": "lua",
+                "size": 0, "verified": False,
+            }
+            await interaction.edit_original_response(
+                embed=script_embed(fallback, error or "GlowAuth could not verify this ID."),
+                view=ScriptPanel(fallback, interaction.user.id),
+            )
+            return
+        await interaction.edit_original_response(
+            embed=script_embed(script),
+            view=ScriptPanel(script, interaction.user.id),
+        )
+    except Exception as exc:
+        print(f"/create script handler error: {type(exc).__name__}: {exc}")
+        fallback = {
+            "id": script_id, "name": "GlowAuth Script", "extension": "lua",
+            "size": 0, "verified": False,
+        }
+        try:
+            await interaction.edit_original_response(
+                embed=script_embed(fallback, "The panel was created, but script lookup failed. Check the bot's Render logs."),
+                view=ScriptPanel(fallback, interaction.user.id),
+            )
+        except Exception as edit_exc:
+            print(f"Could not update script panel: {type(edit_exc).__name__}: {edit_exc}")
 
 
 @bot.event
