@@ -1,19 +1,16 @@
 # GlowAuth Discord Bot
 
-Components V2 Discord bot for GlowAuth.
+Discord Components V2 panels for GlowAuth.
 
 ## Command
 
-`/create script` with required `script_id`.
+Run `/create script` and leave `script_id` empty to send a preview panel. This preview does not need a GlowAuth API key or an uploaded script. To make a panel for an actual upload, supply the 32-character script ID shown in the GlowAuth dashboard.
 
-The bot validates script IDs against GlowAuth's script registry and refreshes the full registry every 60 seconds. The registry contains metadata and deletion state, not uploaded source code.
+The bot attempts to verify real IDs against the public GlowAuth script registry. If verification is unavailable, it still sends an explicitly marked unverified test panel, instead of refusing to send anything. A script marked as deleted by the registry is rejected.
 
-## Render
+## Render environment variables
 
-Environment variables:
-- `DISCORD_TOKEN` — your Discord bot token
-- `GLOWAUTH_BASE_URL` — `https://glowauth.pages.dev`
+- `DISCORD_TOKEN` — your Discord bot token, stored as a secret in Render.
+- `GLOWAUTH_BASE_URL` — `https://glowauth.pages.dev`.
 
-Render supplies `PORT`. The bot exposes `/health` so it can run on the existing Render Web Service.
-
-Requires discord.py 2.6+ for LayoutView and other Components V2 classes.
+No `GLOWAUTH_API_KEY` is required. Render provides `PORT`; the service exposes `/health`.
