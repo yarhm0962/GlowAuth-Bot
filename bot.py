@@ -186,7 +186,7 @@ async def create_script(interaction: discord.Interaction, script_id: str = None)
             "size": 0,
             "verified": False,
         }
-        await interaction.followup.send(
+        await interaction.edit_original_response(
             embed=script_embed(placeholder, "Checking the GlowAuth registry. This panel will update automatically."),
             view=ScriptPanel(placeholder, interaction.user.id),
         )
