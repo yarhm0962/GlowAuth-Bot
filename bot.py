@@ -157,60 +157,80 @@ bot.tree.add_command(group)
 @app_commands.describe(script_id="Optional 32-character script ID from your GlowAuth dashboard")
 @app_commands.guild_only()
 async def create_script(interaction: discord.Interaction, script_id: str = None):
-    if not script_id or not script_id.strip():
-        preview = {"id": "0" * 32, "name": "GlowAuth Panel Preview", "extension": "lua", "size": 0, "preview": True}
-        await interaction.response.send_message(embed=script_embed(preview), view=ScriptPanel(preview, interaction.user.id))
-        return
-
-    script_id = script_id.strip().lower()
-    if not SCRIPT_ID_PATTERN.fullmatch(script_id):
-        await interaction.response.send_message("Enter the 32-character script ID from your GlowAuth dashboard, or leave it empty to preview the panel.", ephemeral=True)
-        return
-
-    placeholder = {
-        "id": script_id, "name": "Checking GlowAuth…", "extension": "lua",
-        "size": 0, "verified": False,
-    }
-    view = ScriptPanel(placeholder, interaction.user.id)
-    await interaction.response.send_message(
-        embed=script_embed(placeholder, "Checking the GlowAuth registry. This panel will update automatically."),
-        view=view,
-    )
     try:
-        script, error = await fetch_script(script_id, force=True)
+        await interaction.response.defer(thinking=True)
+    except discord.InteractionResponded:
+        pass
+    except Exception as exc:
+        print(f"Could not acknowledge /create script interaction: {type(exc).__name__}: {exc}")
+        return
+
+    try:
+        if not script_id or not script_id.strip():
+            preview = {"id": "0" * 32, "name": "GlowAuth Panel Preview", "extension": "lua", "size": 0, "preview": True}
+            await interaction.followup.send(embed=script_embed(preview), view=ScriptPanel(preview, interaction.user.id))
+            return
+
+        script_id = script_id.strip().lower()
+        if not SCRIPT_ID_PATTERN.fullmatch(script_id):
+            await interaction.followup.send(
+                "Enter the 32-character script ID from your GlowAuth dashboard, or leave it empty to preview the panel.",
+                ephemeral=True,
+            )
+            return
+
+        placeholder = {
+            "id": script_id,
+            "name": "Checking GlowAuth…",
+            "extension": "lua",
+            "size": 0,
+            "verified": False,
+        }
+        await interaction.followup.send(
+            embed=script_embed(placeholder, "Checking the GlowAuth registry. This panel will update automatically."),
+            view=ScriptPanel(placeholder, interaction.user.id),
+        )
+
+        try:
+            script, error = await fetch_script(script_id, force=True)
+        except Exception as exc:
+            print(f"GlowAuth lookup failed: {type(exc).__name__}: {exc}")
+            script, error = None, "GlowAuth lookup failed unexpectedly. Check the Render logs."
+
         if script and script.get("deleted"):
             await interaction.edit_original_response(
                 embed=discord.Embed(title="🗑️ Script deleted", description="This script is no longer available.", color=0xED4245),
                 view=None,
             )
             return
+
         if error or not script:
             fallback = {
-                "id": script_id, "name": "GlowAuth Script", "extension": "lua",
-                "size": 0, "verified": False,
+                "id": script_id,
+                "name": "GlowAuth Script",
+                "extension": "lua",
+                "size": 0,
+                "verified": False,
             }
             await interaction.edit_original_response(
                 embed=script_embed(fallback, error or "GlowAuth could not verify this ID."),
                 view=ScriptPanel(fallback, interaction.user.id),
             )
             return
+
         await interaction.edit_original_response(
             embed=script_embed(script),
             view=ScriptPanel(script, interaction.user.id),
         )
     except Exception as exc:
         print(f"/create script handler error: {type(exc).__name__}: {exc}")
-        fallback = {
-            "id": script_id, "name": "GlowAuth Script", "extension": "lua",
-            "size": 0, "verified": False,
-        }
         try:
-            await interaction.edit_original_response(
-                embed=script_embed(fallback, "The panel was created, but script lookup failed. Check the bot's Render logs."),
-                view=ScriptPanel(fallback, interaction.user.id),
+            await interaction.followup.send(
+                "The command started, but the panel could not be rendered. Please check the bot's Render logs.",
+                ephemeral=True,
             )
-        except Exception as edit_exc:
-            print(f"Could not update script panel: {type(edit_exc).__name__}: {edit_exc}")
+        except Exception as followup_exc:
+            print(f"Could not send command error followup: {type(followup_exc).__name__}: {followup_exc}")
 
 
 @bot.event
