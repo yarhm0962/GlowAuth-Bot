@@ -157,49 +157,55 @@ bot.tree.add_command(group)
 @app_commands.describe(script_id="Optional 32-character script ID from your GlowAuth dashboard")
 @app_commands.guild_only()
 async def create_script(interaction: discord.Interaction, script_id: str = None):
-    try:
-        await interaction.response.defer(thinking=True)
-    except discord.InteractionResponded:
-        pass
-    except Exception as exc:
-        print(f"Could not acknowledge /create script interaction: {type(exc).__name__}: {exc}")
-        return
-
-    try:
-        if not script_id or not script_id.strip():
-            preview = {"id": "0" * 32, "name": "GlowAuth Panel Preview", "extension": "lua", "size": 0, "preview": True}
-            await interaction.followup.send(embed=script_embed(preview), view=ScriptPanel(preview, interaction.user.id))
-            return
-
-        script_id = script_id.strip().lower()
-        if not SCRIPT_ID_PATTERN.fullmatch(script_id):
-            await interaction.followup.send(
-                "Enter the 32-character script ID from your GlowAuth dashboard, or leave it empty to preview the panel.",
-                ephemeral=True,
-            )
-            return
-
-        placeholder = {
-            "id": script_id,
-            "name": "Checking GlowAuth…",
+    if not script_id or not script_id.strip():
+        preview = {
+            "id": "0" * 32,
+            "name": "GlowAuth Panel Preview",
             "extension": "lua",
             "size": 0,
-            "verified": False,
+            "preview": True,
         }
-        await interaction.edit_original_response(
-            embed=script_embed(placeholder, "Checking the GlowAuth registry. This panel will update automatically."),
-            view=ScriptPanel(placeholder, interaction.user.id),
-        )
-
         try:
-            script, error = await fetch_script(script_id, force=True)
+            await interaction.response.send_message(
+                embed=script_embed(preview),
+                view=ScriptPanel(preview, interaction.user.id),
+            )
         except Exception as exc:
-            print(f"GlowAuth lookup failed: {type(exc).__name__}: {exc}")
-            script, error = None, "GlowAuth lookup failed unexpectedly. Check the Render logs."
+            print(f"/create script preview response failed: {type(exc).__name__}: {exc}")
+            raise
+        return
 
+    script_id = script_id.strip().lower()
+    if not SCRIPT_ID_PATTERN.fullmatch(script_id):
+        await interaction.response.send_message(
+            "Enter the 32-character script ID from your GlowAuth dashboard, or leave it empty to preview the panel.",
+            ephemeral=True,
+        )
+        return
+
+    placeholder = {
+        "id": script_id,
+        "name": "Checking GlowAuth…",
+        "extension": "lua",
+        "size": 0,
+        "verified": False,
+    }
+
+    # Respond with a real message immediately so the Discord interaction is acknowledged.
+    await interaction.response.send_message(
+        embed=script_embed(placeholder, "Checking the GlowAuth registry. This panel will update shortly."),
+        view=ScriptPanel(placeholder, interaction.user.id),
+    )
+
+    try:
+        script, error = await fetch_script(script_id, force=True)
         if script and script.get("deleted"):
             await interaction.edit_original_response(
-                embed=discord.Embed(title="🗑️ Script deleted", description="This script is no longer available.", color=0xED4245),
+                embed=discord.Embed(
+                    title="🗑️ Script deleted",
+                    description="This script is no longer available.",
+                    color=0xED4245,
+                ),
                 view=None,
             )
             return
@@ -225,12 +231,15 @@ async def create_script(interaction: discord.Interaction, script_id: str = None)
     except Exception as exc:
         print(f"/create script handler error: {type(exc).__name__}: {exc}")
         try:
-            await interaction.followup.send(
-                "The command started, but the panel could not be rendered. Please check the bot's Render logs.",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                embed=script_embed(
+                    placeholder,
+                    "The panel was sent, but an unexpected error occurred while checking this ID. Check Render logs.",
+                ),
+                view=ScriptPanel(placeholder, interaction.user.id),
             )
-        except Exception as followup_exc:
-            print(f"Could not send command error followup: {type(followup_exc).__name__}: {followup_exc}")
+        except Exception as edit_exc:
+            print(f"Could not update script panel after error: {type(edit_exc).__name__}: {edit_exc}")
 
 
 @bot.event
